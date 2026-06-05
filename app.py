@@ -119,6 +119,22 @@ def _gen_range(first_disp, last_disp, gap):
     return [_min_to_disp(t) for t in range(a, b + 1, gap)]
 
 
+def _norm_round(x):
+    """Normalise a round label so '6', 6 and '6.0' all compare equal."""
+    if x is None:
+        return ''
+    s = str(x).strip()
+    if s == '' or s.lower() == 'nan':
+        return ''
+    try:
+        f = float(s)
+        if f.is_integer():
+            return str(int(f))
+    except ValueError:
+        pass
+    return s
+
+
 # ----------------------------------------------------------------------
 # sidebar — status + run
 # ----------------------------------------------------------------------
@@ -178,7 +194,7 @@ with tab_inputs:
                     save_csv(edited, FILES[key])
                     st.success(f"Saved {os.path.basename(FILES[key])}")
 
-    # --- Timeslots: dedicated picker (one court at a time) ---
+    # --- Timeslots: dedicated picker (per court, per round) ---
     with st.expander("Timeslots", expanded=True):
         ts = load_csv(FILES['timeslots'])
         if ts is None:
@@ -188,17 +204,60 @@ with tab_inputs:
                 st.rerun()
         else:
             ts = ts.copy()
-            ts['_label'] = (ts['Venue'].str.strip() + "  ·  "
-                            + ts['Playing Surface'].str.strip() + "  ·  "
-                            + ts['Day'].str.strip())
-            st.caption("Pick a court, set its first and last game, and the slots "
-                       "fill in automatically. Remove any chip the court can't run, "
-                       "or add one. Then Save.")
-            choice = st.selectbox("Court to edit", list(ts['_label']))
-            row_idx = ts.index[ts['_label'] == choice][0]
+            ts['_rnd'] = ts['Round'].map(_norm_round) if 'Round' in ts.columns else ''
 
-            current = _parse_slots_to_disp(ts.loc[row_idx, 'Time_Slots'])
-            ms_key = f"slots_{row_idx}"
+            # Which round are we editing? Default = used for every round.
+            pf = load_csv(FILES['pre_fixtures'])
+            pf_rounds = []
+            if pf is not None and 'round' in pf.columns:
+                pf_rounds = sorted({_norm_round(r) for r in pf['round']} - {''},
+                                   key=lambda x: (len(x), x))
+            round_options = ["Default (all rounds)"] + [f"Round {r}" for r in pf_rounds]
+            round_sel = st.selectbox(
+                "Editing slots for", round_options,
+                help="Default applies to every round. Pick a round to override just "
+                     "that week — handy for holidays, finals, or a closed court.")
+            editing_default = (round_sel == round_options[0])
+            rnd_val = '' if editing_default else round_sel.replace("Round ", "")
+
+            st.caption("Pick a court, set its first and last game, and the slots fill "
+                       "in. Remove any chip the court can't run, or add one. Then Save.")
+
+            # Court list = every distinct court in the file.
+            courts = ts[['Venue', 'Playing Surface', 'Day']].drop_duplicates().copy()
+            courts['_label'] = (courts['Venue'].str.strip() + "  ·  "
+                                + courts['Playing Surface'].str.strip() + "  ·  "
+                                + courts['Day'].str.strip())
+            choice = st.selectbox("Court to edit", list(courts['_label']))
+            crow = courts[courts['_label'] == choice].iloc[0]
+            venue, surface, day = crow['Venue'], crow['Playing Surface'], crow['Day']
+
+            def _find_idx(df, rv):
+                m = ((df['Venue'].astype(str).str.strip() == str(venue).strip())
+                     & (df['Playing Surface'].astype(str).str.strip() == str(surface).strip())
+                     & (df['Day'].astype(str).str.strip() == str(day).strip())
+                     & (df['_rnd'] == _norm_round(rv)))
+                idx = df.index[m]
+                return idx[0] if len(idx) else None
+
+            base_idx = _find_idx(ts, '')
+            ov_idx = None if editing_default else _find_idx(ts, rnd_val)
+            has_override = ov_idx is not None
+            src_idx = ov_idx if has_override else base_idx
+            current = _parse_slots_to_disp(ts.loc[src_idx, 'Time_Slots']) \
+                if src_idx is not None else []
+
+            if editing_default:
+                st.caption("Editing the default slots, used for every round without "
+                           "an override.")
+            elif has_override:
+                st.info(f"This court already has a Round {rnd_val} override — editing it.")
+            else:
+                st.caption(f"No Round {rnd_val} override yet. Starting from the default; "
+                           f"saving will create one for Round {rnd_val} only.")
+
+            ctx = f"{choice}|{rnd_val or 'def'}"
+            ms_key = f"slots_{ctx}"
             if ms_key not in st.session_state:
                 st.session_state[ms_key] = current
 
@@ -209,48 +268,81 @@ with tab_inputs:
             first = c1.selectbox("First game", ALL_TIMES,
                                  index=ALL_TIMES.index(first_default)
                                  if first_default in ALL_TIMES else 0,
-                                 key=f"first_{row_idx}")
+                                 key=f"first_{ctx}")
             last = c2.selectbox("Last game", ALL_TIMES,
                                 index=ALL_TIMES.index(last_default)
                                 if last_default in ALL_TIMES else len(ALL_TIMES) - 1,
-                                key=f"last_{row_idx}")
-            gap = c3.selectbox("Gap", GAP_OPTIONS, key=f"gap_{row_idx}",
+                                key=f"last_{ctx}")
+            gap = c3.selectbox("Gap", GAP_OPTIONS, key=f"gap_{ctx}",
                                format_func=lambda g: f"{g} min")
             c4.write("")
             c4.write("")
-            if c4.button("Generate", key=f"gen_{row_idx}", use_container_width=True):
+            if c4.button("Generate", key=f"gen_{ctx}", use_container_width=True):
                 st.session_state[ms_key] = _gen_range(first, last, gap)
                 st.rerun()
 
             b1, b2 = st.columns(2)
-            if b1.button("Add this range to slots", key=f"add_{row_idx}"):
+            if b1.button("Add this range to slots", key=f"add_{ctx}"):
                 merged = set(st.session_state[ms_key]) | set(_gen_range(first, last, gap))
                 st.session_state[ms_key] = sorted(merged, key=lambda d: _disp_to_min(d))
                 st.rerun()
-            if b2.button("Reset to saved", key=f"reset_{row_idx}"):
+            if b2.button("Reset", key=f"reset_{ctx}"):
                 st.session_state[ms_key] = current
                 st.rerun()
 
-            # Options must include any current selection so the widget never errors.
             options = sorted(set(ALL_TIMES) | set(st.session_state[ms_key]),
                              key=lambda d: _disp_to_min(d))
             selected = st.multiselect(
-                "Slots for this court  (drop the dropdown to add a time; click × to remove)",
+                "Slots  (open the dropdown to add a time; click × to remove)",
                 options, key=ms_key)
 
             n = len(selected)
             st.caption(f"{n} slot{'s' if n != 1 else ''} selected"
-                       + (" — second block / midday break is just a gap in the chips."
-                          if n else " — this court will be skipped."))
+                       + ("" if n else " — this court will be skipped for "
+                          + ("every round." if editing_default else f"Round {rnd_val}.")))
 
-            if st.button("Save this court", key=f"savecourt_{row_idx}", type="primary"):
+            def _upsert(rv, time_str):
+                disk = load_csv(FILES['timeslots'])
+                if 'Round' not in disk.columns:
+                    disk['Round'] = ''
+                disk['Round'] = disk['Round'].fillna('').astype(str)
+                m = ((disk['Venue'].astype(str).str.strip() == str(venue).strip())
+                     & (disk['Playing Surface'].astype(str).str.strip() == str(surface).strip())
+                     & (disk['Day'].astype(str).str.strip() == str(day).strip())
+                     & (disk['Round'].map(_norm_round) == _norm_round(rv)))
+                idx = disk.index[m]
+                if len(idx):
+                    disk.loc[idx[0], 'Time_Slots'] = time_str
+                else:
+                    row = {c: '' for c in disk.columns}
+                    row.update({'Venue': venue, 'Playing Surface': surface,
+                                'Day': day, 'Time_Slots': time_str,
+                                'Round': _norm_round(rv)})
+                    disk = pd.concat([disk, pd.DataFrame([row])], ignore_index=True)
+                save_csv(disk, FILES['timeslots'])
+
+            save_label = ("Save default" if editing_default
+                          else f"Save Round {rnd_val} override")
+            cols_save = st.columns([2, 2]) if has_override else [st]
+            if cols_save[0].button(save_label, key=f"save_{ctx}", type="primary"):
                 ordered = sorted(selected, key=lambda d: _disp_to_min(d))
                 file_str = ", ".join(_min_to_file(_disp_to_min(d)) for d in ordered)
-                ts_disk = load_csv(FILES['timeslots'])
-                ts_disk.loc[row_idx, 'Time_Slots'] = file_str
-                save_csv(ts_disk, FILES['timeslots'])
-                st.success(f"Saved {choice.replace('  ·  ', ' · ')} "
+                _upsert(rnd_val, file_str)
+                where = "default" if editing_default else f"Round {rnd_val}"
+                st.success(f"Saved {where}: {choice.replace('  ·  ', ' · ')} "
                            f"({len(ordered)} slots).")
+            if has_override and cols_save[1].button(
+                    "Remove override (use default)", key=f"rmov_{ctx}"):
+                disk = load_csv(FILES['timeslots'])
+                m = ((disk['Venue'].astype(str).str.strip() == str(venue).strip())
+                     & (disk['Playing Surface'].astype(str).str.strip() == str(surface).strip())
+                     & (disk['Day'].astype(str).str.strip() == str(day).strip())
+                     & (disk.get('Round', pd.Series([''] * len(disk))).map(_norm_round)
+                        == _norm_round(rnd_val)))
+                save_csv(disk[~m], FILES['timeslots'])
+                st.session_state.pop(ms_key, None)
+                st.success(f"Removed the Round {rnd_val} override for this court.")
+                st.rerun()
 
     st.divider()
     st.subheader("Round matchups — pre_fixtures.csv")
