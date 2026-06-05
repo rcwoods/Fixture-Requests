@@ -49,16 +49,16 @@ st.set_page_config(
     layout="wide",
 )
 
-# Brand polish: header accents, tidy spacing, on-brand expander/tab headers.
+# Brand polish: keep it light-touch and readable in any theme.
 st.markdown(f"""
 <style>
-.mba-title {{ font-size: 1.7rem; font-weight: 600; color: {MAROON};
-              line-height: 1.1; margin: 0; }}
-.mba-sub {{ font-size: 1.0rem; color: {NAVY}; opacity: .75; margin: 2px 0 0; }}
-.mba-rule {{ border: none; border-top: 3px solid {GOLD}; margin: 8px 0 18px; }}
-div[data-testid="stExpander"] details summary p {{ font-weight: 600; color: {NAVY}; }}
+.block-container {{ padding-top: 2.2rem; max-width: 1100px; }}
+.mba-title {{ font-size: 1.55rem; font-weight: 600; color: {MAROON};
+              line-height: 1.15; margin: 0; }}
+.mba-sub {{ font-size: .95rem; color: #6B6B6B; margin: 2px 0 0; }}
+.mba-rule {{ border: none; border-top: 3px solid {GOLD}; margin: 6px 0 14px; }}
 button[data-baseweb="tab"] {{ font-weight: 600; }}
-h2, h3 {{ color: {NAVY}; }}
+div[data-testid="stExpander"] details summary p {{ font-weight: 600; }}
 </style>
 """, unsafe_allow_html=True)
 
@@ -272,15 +272,14 @@ run_clicked = st.sidebar.button("▶  Generate fixtures", type="primary",
 # header
 # ----------------------------------------------------------------------
 
-_hc1, _hc2 = st.columns([1, 11], vertical_alignment="center")
-with _hc1:
-    if os.path.exists(LOGO):
-        st.image(LOGO, width=72)
-with _hc2:
-    st.markdown(
-        "<p class='mba-title'>McKinnon Basketball Association</p>"
-        "<p class='mba-sub'>Fixture Scheduler</p>",
-        unsafe_allow_html=True)
+_title_html = ("<p class='mba-title'>McKinnon Basketball Association</p>"
+               "<p class='mba-sub'>Fixture Scheduler</p>")
+if os.path.exists(LOGO):
+    _hc1, _hc2 = st.columns([1, 11], vertical_alignment="center")
+    _hc1.image(LOGO, width=72)
+    _hc2.markdown(_title_html, unsafe_allow_html=True)
+else:
+    st.markdown(_title_html, unsafe_allow_html=True)
 st.markdown("<hr class='mba-rule'>", unsafe_allow_html=True)
 
 
