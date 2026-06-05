@@ -96,7 +96,7 @@ def _disp_to_min(s):
     return h * 60 + mi
 
 
-ALL_TIMES = [_min_to_disp(t) for t in range(8 * 60, 21 * 60 + 1, 15)]
+ALL_TIMES = [_min_to_disp(t) for t in range(8 * 60, 21 * 60 + 1, 5)]
 GAP_OPTIONS = [45, 30, 40, 50, 60]
 
 
