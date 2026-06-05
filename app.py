@@ -64,6 +64,61 @@ def file_status_line(label, path):
     return f"✗ {label} — missing"
 
 
+# ----- timeslot helpers -----------------------------------------------
+# Candidate start times offered in the pickers: every 15 minutes from
+# 8:00 AM to 9:00 PM. Display form is "8:15 AM"; stored form matches the
+# existing file style ("8:15 am", on-the-hour as "9 am").
+
+def _min_to_disp(mins):
+    h, m = divmod(mins, 60)
+    ap = 'AM' if h < 12 else 'PM'
+    h12 = h % 12 or 12
+    return f"{h12}:{m:02d} {ap}"
+
+
+def _min_to_file(mins):
+    h, m = divmod(mins, 60)
+    ap = 'am' if h < 12 else 'pm'
+    h12 = h % 12 or 12
+    return f"{h12} {ap}" if m == 0 else f"{h12}:{m:02d} {ap}"
+
+
+def _disp_to_min(s):
+    import re
+    m = re.match(r'(\d{1,2}):(\d{2})\s*(AM|PM)', str(s).strip(), re.I)
+    if not m:
+        return None
+    h, mi, ap = int(m.group(1)), int(m.group(2)), m.group(3).upper()
+    if ap == 'PM' and h != 12:
+        h += 12
+    if ap == 'AM' and h == 12:
+        h = 0
+    return h * 60 + mi
+
+
+ALL_TIMES = [_min_to_disp(t) for t in range(8 * 60, 21 * 60 + 1, 15)]
+GAP_OPTIONS = [45, 30, 40, 50, 60]
+
+
+def _parse_slots_to_disp(time_slots_str):
+    """Existing 'Time_Slots' cell -> list of canonical display strings."""
+    out = []
+    for tok in str(time_slots_str).split(','):
+        mins = rf.time_to_minutes(tok.strip()) if tok.strip() else None
+        if mins is not None and mins >= 0:
+            out.append(_min_to_disp(mins))
+    # de-dupe, keep sorted by time
+    seen = sorted(set(out), key=lambda d: _disp_to_min(d))
+    return seen
+
+
+def _gen_range(first_disp, last_disp, gap):
+    a, b = _disp_to_min(first_disp), _disp_to_min(last_disp)
+    if a is None or b is None or b < a:
+        return []
+    return [_min_to_disp(t) for t in range(a, b + 1, gap)]
+
+
 # ----------------------------------------------------------------------
 # sidebar — status + run
 # ----------------------------------------------------------------------
@@ -96,15 +151,12 @@ with tab_inputs:
     st.write("Edit the stable config below and save. Load the round's matchups "
              "at the bottom.")
 
-    # Editable config tables
+    # --- Teams and Division Venues: simple editable tables ---
     for key, label, help_text in [
         ('teams', 'Teams',
          "One row per team. Set Linked_Team1..8 for siblings that should be "
          "spaced/clustered, and Unavailable_Times like '<11 am' (no games "
          "before 11am) or '>9:45 am' (no games after 9:45am), separated by ';'."),
-        ('timeslots', 'Timeslots',
-         "One row per venue + court + day, with the comma-separated start times "
-         "that court can run. Leave Time_Slots blank to skip a court."),
         ('division_venues', 'Division Venues',
          "Which divisions each court prefers. Used to steer grades to the right "
          "venues."),
@@ -122,10 +174,83 @@ with tab_inputs:
                 edited = st.data_editor(df, num_rows="dynamic",
                                         use_container_width=True, key=f"ed_{key}",
                                         height=320)
-                c1, c2 = st.columns([1, 6])
-                if c1.button(f"Save {label}", key=f"save_{key}"):
+                if st.button(f"Save {label}", key=f"save_{key}"):
                     save_csv(edited, FILES[key])
                     st.success(f"Saved {os.path.basename(FILES[key])}")
+
+    # --- Timeslots: dedicated picker (one court at a time) ---
+    with st.expander("Timeslots", expanded=True):
+        ts = load_csv(FILES['timeslots'])
+        if ts is None:
+            up = st.file_uploader("Upload timeslots CSV", type="csv", key="up_ts")
+            if up is not None:
+                save_csv(pd.read_csv(up, dtype=str), FILES['timeslots'])
+                st.rerun()
+        else:
+            ts = ts.copy()
+            ts['_label'] = (ts['Venue'].str.strip() + "  ·  "
+                            + ts['Playing Surface'].str.strip() + "  ·  "
+                            + ts['Day'].str.strip())
+            st.caption("Pick a court, set its first and last game, and the slots "
+                       "fill in automatically. Remove any chip the court can't run, "
+                       "or add one. Then Save.")
+            choice = st.selectbox("Court to edit", list(ts['_label']))
+            row_idx = ts.index[ts['_label'] == choice][0]
+
+            current = _parse_slots_to_disp(ts.loc[row_idx, 'Time_Slots'])
+            ms_key = f"slots_{row_idx}"
+            if ms_key not in st.session_state:
+                st.session_state[ms_key] = current
+
+            c1, c2, c3, c4 = st.columns([2, 2, 1.4, 1.6])
+            cur = st.session_state[ms_key]
+            first_default = cur[0] if cur else "9:00 AM"
+            last_default = cur[-1] if cur else "6:00 PM"
+            first = c1.selectbox("First game", ALL_TIMES,
+                                 index=ALL_TIMES.index(first_default)
+                                 if first_default in ALL_TIMES else 0,
+                                 key=f"first_{row_idx}")
+            last = c2.selectbox("Last game", ALL_TIMES,
+                                index=ALL_TIMES.index(last_default)
+                                if last_default in ALL_TIMES else len(ALL_TIMES) - 1,
+                                key=f"last_{row_idx}")
+            gap = c3.selectbox("Gap", GAP_OPTIONS, key=f"gap_{row_idx}",
+                               format_func=lambda g: f"{g} min")
+            c4.write("")
+            c4.write("")
+            if c4.button("Generate", key=f"gen_{row_idx}", use_container_width=True):
+                st.session_state[ms_key] = _gen_range(first, last, gap)
+                st.rerun()
+
+            b1, b2 = st.columns(2)
+            if b1.button("Add this range to slots", key=f"add_{row_idx}"):
+                merged = set(st.session_state[ms_key]) | set(_gen_range(first, last, gap))
+                st.session_state[ms_key] = sorted(merged, key=lambda d: _disp_to_min(d))
+                st.rerun()
+            if b2.button("Reset to saved", key=f"reset_{row_idx}"):
+                st.session_state[ms_key] = current
+                st.rerun()
+
+            # Options must include any current selection so the widget never errors.
+            options = sorted(set(ALL_TIMES) | set(st.session_state[ms_key]),
+                             key=lambda d: _disp_to_min(d))
+            selected = st.multiselect(
+                "Slots for this court  (drop the dropdown to add a time; click × to remove)",
+                options, key=ms_key)
+
+            n = len(selected)
+            st.caption(f"{n} slot{'s' if n != 1 else ''} selected"
+                       + (" — second block / midday break is just a gap in the chips."
+                          if n else " — this court will be skipped."))
+
+            if st.button("Save this court", key=f"savecourt_{row_idx}", type="primary"):
+                ordered = sorted(selected, key=lambda d: _disp_to_min(d))
+                file_str = ", ".join(_min_to_file(_disp_to_min(d)) for d in ordered)
+                ts_disk = load_csv(FILES['timeslots'])
+                ts_disk.loc[row_idx, 'Time_Slots'] = file_str
+                save_csv(ts_disk, FILES['timeslots'])
+                st.success(f"Saved {choice.replace('  ·  ', ' · ')} "
+                           f"({len(ordered)} slots).")
 
     st.divider()
     st.subheader("Round matchups — pre_fixtures.csv")
@@ -142,6 +267,7 @@ with tab_inputs:
         st.write(f"Loaded **{len(pf)}** matchups"
                  + (f" across rounds {', '.join(map(str, rounds))}." if rounds else "."))
         st.dataframe(pf.head(20), use_container_width=True, height=240)
+
 
 
 # ---- TAB 2: RUN ------------------------------------------------------
