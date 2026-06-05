@@ -1,0 +1,75 @@
+================================================================
+FIXTURE SUMMARY
+================================================================
+Rounds processed : 6, 7, 8, 9, 10, 11, 12, 13
+Games scheduled  : 2924
+Byes             : 176
+Unscheduled      : 4
+
+----------------------------------------------------------------
+Where the games landed (per round, per day)
+----------------------------------------------------------------
+  Round 6: Saturday 212, Sunday 153
+  Round 7: Saturday 212, Sunday 154
+  Round 8: Saturday 212, Sunday 154
+  Round 9: Saturday 212, Sunday 154
+  Round 10: Saturday 212, Sunday 154
+  Round 11: Saturday 211, Sunday 153
+  Round 12: Saturday 211, Sunday 154
+  Round 13: Saturday 212, Sunday 154
+
+----------------------------------------------------------------
+Couldn't be scheduled (4) — and what to do
+----------------------------------------------------------------
+  R6 Sunday U8 Girls PURPLE: Vampires Basketball U8 Girls Diamonds v JETS U8 Girls Serge
+      Fix: not enough court time on that day for this age group — add a slot or court in timeslots.csv, or move a fixture to the other day.
+  R11 Saturday U16 Boys Div 11: Lakers U16 Boys Maroon v ABA U16 Wolverines Combat
+      Fix: not enough court time on that day for this age group — add a slot or court in timeslots.csv, or move a fixture to the other day.
+  R11 Sunday U8 Girls PURPLE: JETS U8 Girls Serge v Vampires Basketball U8 Girls Diamonds
+      Fix: not enough court time on that day for this age group — add a slot or court in timeslots.csv, or move a fixture to the other day.
+  R12 Saturday U16 Boys Div 11: Lakers U16 Boys Maroon v U16 Boys Anderson Park Piranhas
+      Fix: not enough court time on that day for this age group — add a slot or court in timeslots.csv, or move a fixture to the other day.
+
+----------------------------------------------------------------
+Unavailable_Times not fully honoured (16)
+(usually means every legal slot was already taken)
+----------------------------------------------------------------
+  R6 Lakers U14 Boys Yellow (wants <1 pm) -> placed 11:15AM  [Saturday U14 Boys Div  4]
+  R6 RAPTORS U14 Boys Orange (wants >1:30 pm) -> placed 02:15PM  [Saturday U14 Boys Div  3]
+  R6 Lakers U16 Boys Blue (wants <2 pm; >3 pm) -> placed 04:30PM  [Saturday U16 Boys Div  3]
+  R8 Thunder Warriors U10 Boys (wants <11 am) -> placed 08:15AM  [Saturday U10 Boys Div  1]
+  R10 Lakers U14 Boys Flame (wants <1:30 pm) -> placed 11:15AM  [Saturday U14 Boys Div  3]
+  R11 Thunder Warriors U10 Boys (wants <11 am) -> placed 08:15AM  [Saturday U10 Boys Div  1]
+  R11 JETS U14 Boys Louie (wants <3 pm) -> placed 11:15AM  [Saturday U14 Boys Div  1]
+  R11 Rogue Bears (wants >3 pm) -> placed 03:45PM  [Saturday U16 Boys Div  4]
+  R11 St Kilda Warriors BRAVE U16 Boys (wants >4:30 pm) -> placed 05:15PM  [Saturday U16 Boys Div  1]
+  R13 Dark Wolves U14 Boys (wants <2 pm) -> placed 10:30AM  [Saturday U14 Boys Div  3]
+  R13 Lakers U14 Boys Emerald (wants <1 pm) -> placed 11:15AM  [Saturday U14 Boys Div  9]
+  R13 St Kilda Warriors BRAVE U16 Boys (wants >4:30 pm) -> placed 05:15PM  [Saturday U16 Boys Div  1]
+  R6 Lakers U12 Girls Ruby (wants >9:45 am) -> placed 01:30PM  [Sunday U12 Girls Div  4]
+  R8 Lakers U12 Girls Ruby (wants >9:45 am) -> placed 10:30AM  [Sunday U12 Girls Div  4]
+  R10 Lakers U12 Girls Ruby (wants >9:45 am) -> placed 01:30PM  [Sunday U12 Girls Div  4]
+  R11 Skuld Warriors U14 Girls (wants <11 am) -> placed 10:30AM  [Sunday U14 Girls Div  1]
+
+----------------------------------------------------------------
+Young age groups starting late (worth a glance)
+----------------------------------------------------------------
+  U8 after 12:30 pm: 9 game(s)
+      R7  12:45PM  Sunday U8 Girls PINK  Star Wolves U8 Girls v U8 Girls Saints - Flyers
+      R7  01:30PM  Sunday U8 Girls PURPLE  U8 Girls Saints - Stars v Carnegie Chargers U8 Girls Tom
+      R8  12:45PM  Sunday U8 Girls PURPLE  JETS U8 Girls Serge v U8 Girls Saints - Stars
+      R8  12:45PM  Sunday U8 Girls PURPLE  Snow Wolves U8 Girls v JETS U8 Girls Sinem
+      R10  12:45PM  Sunday U8 Girls PINK  Thunder Wolves U8 Girls v U8 Girls Saints - Dream
+      R10  01:30PM  Sunday U8 Girls PURPLE  Vampires Basketball U8 Girls Diamonds v U8 Girls Saints - Stars
+      R11  12:45PM  Sunday U8 Girls PINK  Vampires Basketball U8 Girls Little Legends v Thunder Wolves U8 Girls
+      R13  12:45PM  Sunday U8 Girls PURPLE  Vampires Basketball U8 Girls Diamonds v Carnegie Chargers U8 Girls Tom
+  U12 after 3:00 pm: 5 game(s)
+      R6  03:00PM  Saturday U12 Boys Div  3  St Kilda Warriors POWER U12 Boys v Titan Warriors U12 Boys
+      R9  03:00PM  Saturday U12 Boys Div  3  St Kilda Warriors POWER U12 Boys v RAPTORS U12 Boys Chris
+      R10  03:00PM  Saturday U12 Boys Div  2  St Kilda Warriors BRAVE U12 Boys v RAPTORS U12 Boys Richard
+      R12  03:00PM  Saturday U12 Boys Div  3  Saints U12 Boys Warriors v St Kilda Warriors POWER U12 Boys
+      R13  03:00PM  Saturday U12 Boys Div  2  JETS U12 Boys Andrew v St Kilda Warriors BRAVE U12 Boys
+
+================================================================
+Upload file: scheduled_fixtures.csv  (PlayHQ template format)
+================================================================
