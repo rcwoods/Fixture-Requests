@@ -169,6 +169,64 @@ def divisions_from_pre_fixtures():
     return sorted({d for d in divs if d}, key=_div_sort_key)
 
 
+
+
+# ----- blank/example templates + per-section download buttons ---------
+
+TEMPLATES = {
+    'teams': (
+        "Grade,Team,Linked_Team1,Linked_Team2,Linked_Team3,Linked_Team4,"
+        "Linked_Team5,Linked_Team6,Linked_Team7,Linked_Team8,Unavailable_Times\n"
+        "Saturday U10 Boys Div  1,Example Team A,Example Team B,,,,,,,,>9 am\n"
+        "Saturday U10 Boys Div  1,Example Team B,Example Team A,,,,,,,,\n"
+    ),
+    'timeslots': (
+        "Venue,Playing Surface,Day,Time_Slots,Round\n"
+        "Example Venue,Court 1,Saturday,\"8:15 am, 9 am, 9:45 am, 10:30 am\",\n"
+        "Example Venue,Court 1,Saturday,\"10:30 am, 11:15 am\",6\n"
+    ),
+    'division_venues': (
+        "Venue,Playing Surface,Preferred_Divisions\n"
+        "Example Venue,Court 1,\"Div 1, Div 2, BLUE, RED\"\n"
+    ),
+    'pre_fixtures': (
+        "organisation,competition,season,grade,round date,round,home team,"
+        "away team,venue,playing surface,game date,game time,game alias\n"
+        "McKinnon Basketball Association,Example Competition,Winter 2026,"
+        "Saturday U10 Boys Div  1,13/6/2026,6,Example Home Team,Example Away Team,"
+        ",,13/6/2026,,\n"
+    ),
+}
+
+
+def _section_downloads(skey, filename):
+    stem = filename.rsplit('.', 1)[0]
+    st.divider()
+    st.caption("Template · import · export")
+    c1, c2 = st.columns(2)
+    c1.download_button("⬇ Template", TEMPLATES[skey],
+                       file_name=f"{stem}_template.csv", mime="text/csv",
+                       key=f"tmpl_{skey}", use_container_width=True)
+    path = FILES[skey]
+    if os.path.exists(path):
+        with open(path, 'r') as f:
+            data = f.read()
+        c2.download_button("⬇ Current CSV", data, file_name=filename,
+                           mime="text/csv", key=f"cur_{skey}",
+                           use_container_width=True)
+    else:
+        c2.caption("No current file yet")
+    up = st.file_uploader(f"⬆ Upload a CSV to replace {filename}",
+                          type="csv", key=f"upio_{skey}")
+    if up is not None:
+        sig = f"{up.name}:{getattr(up, 'size', '')}"
+        if st.session_state.get(f"upsig_{skey}") != sig:
+            st.session_state[f"upsig_{skey}"] = sig
+            save_csv(pd.read_csv(up, dtype=str), path)
+            st.success(f"Loaded {filename}.")
+            st.rerun()
+
+
 # ----------------------------------------------------------------------
 # sidebar — status + run
 # ----------------------------------------------------------------------
@@ -210,13 +268,11 @@ with tab_inputs:
     ]:
         with st.expander(label, expanded=(key == 'teams')):
             st.caption(help_text)
+            _section_downloads(key, os.path.basename(FILES[key]))
             df = load_csv(FILES[key])
             if df is None:
-                up = st.file_uploader(f"Upload {label.lower()} CSV", type="csv",
-                                      key=f"up_{key}")
-                if up is not None:
-                    save_csv(pd.read_csv(up, dtype=str), FILES[key])
-                    st.rerun()
+                st.info("No teams.csv loaded yet — upload one or download the "
+                        "template above.")
             else:
                 edited = st.data_editor(df, num_rows="dynamic",
                                         use_container_width=True, key=f"ed_{key}",
@@ -227,13 +283,11 @@ with tab_inputs:
 
     # --- Division Venues: pick preferred divisions per court ---
     with st.expander("Division Venues", expanded=False):
+        _section_downloads('division_venues', 'division_venues.csv')
         dv = load_csv(FILES['division_venues'])
         if dv is None:
-            up = st.file_uploader("Upload division_venues CSV", type="csv",
-                                  key="up_dv")
-            if up is not None:
-                save_csv(pd.read_csv(up, dtype=str), FILES['division_venues'])
-                st.rerun()
+            st.info("No division_venues.csv loaded yet — upload one or download "
+                    "the template above.")
         else:
             dv = dv.copy()
             dv['_label'] = (dv['Venue'].str.strip() + "  ·  "
@@ -330,12 +384,11 @@ with tab_inputs:
 
     # --- Timeslots: dedicated picker (per court, per round) ---
     with st.expander("Timeslots", expanded=True):
+        _section_downloads('timeslots', 'timeslots.csv')
         ts = load_csv(FILES['timeslots'])
         if ts is None:
-            up = st.file_uploader("Upload timeslots CSV", type="csv", key="up_ts")
-            if up is not None:
-                save_csv(pd.read_csv(up, dtype=str), FILES['timeslots'])
-                st.rerun()
+            st.info("No timeslots.csv loaded yet — upload one or download the "
+                    "template above.")
         else:
             ts = ts.copy()
             ts['_rnd'] = ts['Round'].map(_norm_round) if 'Round' in ts.columns else ''
@@ -549,11 +602,8 @@ with tab_inputs:
     st.divider()
     st.subheader("Round matchups — pre_fixtures.csv")
     st.caption("This is the per-round file from your matchup generator / PlayHQ "
-               "(home vs away per grade, no venue or time yet). Upload it here.")
-    up = st.file_uploader("Upload pre_fixtures.csv", type="csv", key="up_pre")
-    if up is not None:
-        save_csv(pd.read_csv(up, dtype=str), FILES['pre_fixtures'])
-        st.success("Loaded pre_fixtures.csv")
+               "(home vs away per grade, no venue or time yet).")
+    _section_downloads('pre_fixtures', 'pre_fixtures.csv')
     pf = load_csv(FILES['pre_fixtures'])
     if pf is not None:
         rounds = sorted(pf['round'].unique(), key=lambda x: (len(str(x)), str(x))) \
