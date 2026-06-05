@@ -40,7 +40,30 @@ FILES = {
     'unscheduled': os.path.join(BASE, 'unscheduled_fixtures.csv'),
 }
 
-st.set_page_config(page_title="MBA Fixture Scheduler", page_icon="🏀", layout="wide")
+LOGO = os.path.join(BASE, 'mckinnon_logo.png')
+MAROON, GOLD, NAVY = "#881840", "#F8B020", "#082038"
+
+st.set_page_config(
+    page_title="MBA Fixture Scheduler",
+    page_icon=LOGO if os.path.exists(LOGO) else "🏀",
+    layout="wide",
+)
+
+# Brand polish: header accents, tidy spacing, on-brand expander/tab headers.
+st.markdown(f"""
+<style>
+.mba-title {{ font-size: 1.7rem; font-weight: 600; color: {MAROON};
+              line-height: 1.1; margin: 0; }}
+.mba-sub {{ font-size: 1.0rem; color: {NAVY}; opacity: .75; margin: 2px 0 0; }}
+.mba-rule {{ border: none; border-top: 3px solid {GOLD}; margin: 8px 0 18px; }}
+div[data-testid="stExpander"] details summary p {{ font-weight: 600; color: {NAVY}; }}
+button[data-baseweb="tab"] {{ font-weight: 600; }}
+h2, h3 {{ color: {NAVY}; }}
+</style>
+""", unsafe_allow_html=True)
+
+if os.path.exists(LOGO):
+    st.logo(LOGO, size="large")
 
 
 # ----------------------------------------------------------------------
@@ -231,7 +254,7 @@ def _section_downloads(skey, filename):
 # sidebar — status + run
 # ----------------------------------------------------------------------
 
-st.sidebar.title("🏀 Fixture Scheduler")
+st.sidebar.title("Fixture Scheduler")
 st.sidebar.caption("Everything reads/writes the CSV files next to this app.")
 
 st.sidebar.subheader("Input files")
@@ -243,6 +266,22 @@ for key, label in [('teams', 'teams.csv'), ('timeslots', 'timeslots.csv'),
 st.sidebar.divider()
 run_clicked = st.sidebar.button("▶  Generate fixtures", type="primary",
                                 use_container_width=True)
+
+
+# ----------------------------------------------------------------------
+# header
+# ----------------------------------------------------------------------
+
+_hc1, _hc2 = st.columns([1, 11], vertical_alignment="center")
+with _hc1:
+    if os.path.exists(LOGO):
+        st.image(LOGO, width=72)
+with _hc2:
+    st.markdown(
+        "<p class='mba-title'>McKinnon Basketball Association</p>"
+        "<p class='mba-sub'>Fixture Scheduler</p>",
+        unsafe_allow_html=True)
+st.markdown("<hr class='mba-rule'>", unsafe_allow_html=True)
 
 
 # ----------------------------------------------------------------------
