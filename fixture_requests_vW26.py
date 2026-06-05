@@ -470,6 +470,72 @@ VENUE_SURFACE_LOOKUP: dict[str, tuple[str, str]] = {}
 timeslots_df = _merge_venue_surface(timeslots_df)
 division_venues_df = _merge_venue_surface(division_venues_df)
 
+# Full, unmodified timeslots (may include an optional 'Round' column for
+# per-round overrides). The active `timeslots_df` is resolved from this once
+# per round inside schedule_round, so per-round changes flow through every
+# part of the engine that reads timeslots without further edits.
+BASE_TIMESLOTS_DF = timeslots_df.copy()
+
+
+def effective_timeslots_for_round(round_label):
+    """
+    Resolve the timeslots that apply to one round.
+
+    timeslots.csv may carry an optional 'Round' column:
+      - rows with a blank Round are the default, used for every round;
+      - rows with a Round value override the default for that round only,
+        per court (Day + Venue).
+
+    Resolution per court: use the round's override row if present, else the
+    default row. A court whose override has blank Time_Slots is closed for
+    that round; a court that only appears as an override is added just for
+    that round. With no 'Round' column the behaviour is unchanged.
+    """
+    df = BASE_TIMESLOTS_DF
+    if 'Round' not in df.columns:
+        return df
+
+    def _norm_round(x):
+        # Normalise round labels so '6', 6 and '6.0' all compare equal,
+        # since CSV loading can type the column as float when blanks are present.
+        if x is None or (isinstance(x, float) and pd.isna(x)):
+            return ''
+        s = str(x).strip()
+        if s == '' or s.lower() == 'nan':
+            return ''
+        try:
+            f = float(s)
+            if f.is_integer():
+                return str(int(f))
+        except ValueError:
+            pass
+        return s
+
+    rl = _norm_round(round_label)
+    baseline, override, order = {}, {}, []
+    for _, row in df.iterrows():
+        key = (row['Day'], row['Venue'])
+        rstr = _norm_round(row.get('Round', ''))
+        slots = row.get('Time_Slots', '')
+        if rstr == '':
+            if key not in baseline:
+                order.append(key)
+            baseline[key] = slots
+        elif rstr == rl:
+            if key not in baseline and key not in override:
+                order.append(key)
+            override[key] = slots
+
+    rows, seen = [], set()
+    for key in order:
+        if key in seen:
+            continue
+        seen.add(key)
+        day, venue = key
+        rows.append({'Day': day, 'Venue': venue,
+                     'Time_Slots': override.get(key, baseline.get(key, ''))})
+    return pd.DataFrame(rows, columns=['Day', 'Venue', 'Time_Slots'])
+
 # Add Round if missing so single-round behaviour is unchanged
 if 'Round' not in pre_fixtures_df.columns:
     pre_fixtures_df['Round'] = 1
@@ -600,13 +666,17 @@ def time_to_minutes(t):
 
 def format_game_time(t) -> str:
     """
-    Format a time string for the upload-template output as zero-padded
-    12-hour time with uppercase meridiem and no space, e.g.:
-        '8:15 am'  -> '08:15AM'
+    Format a time string to match the Advanced Fixture Report convention:
+    12-hour time, NO leading zero on the hour, uppercase meridiem, no space.
+        '8:15 am'  -> '8:15AM'
+        '9 am'     -> '9:00AM'
         '12 pm'    -> '12:00PM'
-        '8:30 pm'  -> '08:30PM'
+        '8:30 pm'  -> '8:30PM'
         '11:25 am' -> '11:25AM'
     Blank/BYE times pass through as an empty string.
+
+    Note: the reference report does not zero-pad the hour ('9:00AM', not
+    '09:00AM'). This matches PlayHQ's own export/display format.
     """
     if t is None:
         return ''
@@ -622,7 +692,7 @@ def format_game_time(t) -> str:
     hour12 = hour24 % 12
     if hour12 == 0:
         hour12 = 12
-    return f"{hour12:02d}:{minute:02d}{period}"
+    return f"{hour12}:{minute:02d}{period}"
 
 def min_start_minutes_for_age(grade_text: str, day: str | None = None) -> int:
     """
@@ -1893,19 +1963,26 @@ def _fixture_cluster_id(team1: str, team2) -> int:
 
 def sort_indices_for_day(indices, pre_fixtures_round, day, slots_today):
     """
-    Sort fixture indices for a given day by:
-      0) Heavy-linked clubs FIRST (≥ HEAVY_LINKED_THRESHOLD linked teams),
-         and within that, sort by link count descending — so clubs with
-         many siblings (e.g. St Kilda Warriors, 7 linked teams) get processed
-         before clubs with fewer (e.g. MM, 4 linked teams). This matters
-         because heavily-tied clubs need a longer continuous block at one
-         court; processing them first lets them claim the full block before
-         other heavy-linked clubs take individual slots within that block.
-      1) Age (younger ages first within the heavy-linked / normal buckets),
-      2) Flexibility (fewest usable slots first within each age),
-      3) Linked-cluster id so linked teams are processed consecutively,
-      4) Deterministic random order,
-      5) Original index (stable tie-breaker).
+    Sort fixture indices for a given day. AGE IS THE DOMINANT KEY so that
+    younger age groups are always processed (and therefore placed) before
+    older ones, matching the reference report where each court runs strictly
+    youngest-to-oldest through the day (e.g. all U8s in the morning, then
+    U10, U12, U14, U16, U18, U20/Open).
+
+    Sort order:
+      1) Age (younger ages first) — PRIMARY. Nothing reorders across ages.
+      2) Flexibility (fewest usable slots first) — within an age band, the
+         tightest-window fixtures go first so teams with Unavailable_Times
+         still claim a legal slot before the band fills. This folds the old
+         "requests first" behaviour into the age band instead of letting it
+         override age.
+      3) Heavy-linked tier, then link count descending — within an age band,
+         heavily-tied clubs (e.g. St Kilda Warriors) are processed first so
+         their same-age siblings can cluster. This no longer jumps ahead of
+         younger ages.
+      4) Linked-cluster id so linked teams are processed consecutively,
+      5) Deterministic random order,
+      6) Original index (stable tie-breaker).
     """
     def link_count(i):
         t1 = pre_fixtures_round.loc[i, 'Team 1']
@@ -1927,10 +2004,10 @@ def sort_indices_for_day(indices, pre_fixtures_round, day, slots_today):
     return sorted(
         indices,
         key=lambda i: (
-            heavy_linked_tier(i),
-            -link_count(i),                # most-linked first within tier
-            pre_fixtures_round.loc[i, 'Age_Order'],
+            pre_fixtures_round.loc[i, 'Age_Order'],   # AGE FIRST — dominant
             fixture_flexibility_score(pre_fixtures_round, i, day, slots_today),
+            heavy_linked_tier(i),
+            -link_count(i),                # most-linked first within age+tightness
             _fixture_cluster_id(
                 pre_fixtures_round.loc[i, 'Team 1'],
                 pre_fixtures_round.loc[i, 'Team 2'],
@@ -2498,6 +2575,11 @@ def schedule_round(pre_fixtures_round: pd.DataFrame, round_label) -> tuple[pd.Da
     Schedule all fixtures for a single Round (e.g. Round 1, 2, 3...).
     Returns (scheduled_df_round, unscheduled_df_round).
     """
+    # Resolve this round's timeslots (applies any per-round overrides). Every
+    # function that reads the global timeslots_df now sees the round's slots.
+    global timeslots_df
+    timeslots_df = effective_timeslots_for_round(round_label)
+
     master_slots = build_master_slots()
 
     # Each round gets a fresh set of cluster→home-court assignments so a club
@@ -2531,19 +2613,17 @@ def schedule_round(pre_fixtures_round: pd.DataFrame, round_label) -> tuple[pd.Da
         day_mask = pre_fixtures_round['Day'] == day
         day_rows = pre_fixtures_round[day_mask]
 
-        req_indices = []
-        no_req_indices = []
-        for idx, _ in day_rows.iterrows():
-            if idx in processed_indices:
-                continue
-            if fixture_has_unavailability(pre_fixtures_round, idx):
-                req_indices.append(idx)
-            else:
-                no_req_indices.append(idx)
-
-        req_sorted = sort_indices_for_day(req_indices, pre_fixtures_round, day, slots_today)
-        no_req_sorted = sort_indices_for_day(no_req_indices, pre_fixtures_round, day, slots_today)
-        day_indices_sorted = req_sorted + no_req_sorted
+        # Single age-dominant ordering for ALL of the day's fixtures. Age is
+        # the primary key inside sort_indices_for_day, so younger ages are
+        # placed before older ones regardless of Unavailable_Times; tightness
+        # is handled within each age band.
+        all_indices = [
+            idx for idx, _ in day_rows.iterrows()
+            if idx not in processed_indices
+        ]
+        day_indices_sorted = sort_indices_for_day(
+            all_indices, pre_fixtures_round, day, slots_today
+        )
 
         for idx in day_indices_sorted:
             if idx in processed_indices:
@@ -2639,19 +2719,12 @@ def schedule_round(pre_fixtures_round: pd.DataFrame, round_label) -> tuple[pd.Da
         day_mask = pre_fixtures_round['Day'] == day
         day_rows = pre_fixtures_round[day_mask]
 
-        req_indices = []
-        no_req_indices = []
-        for idx, _ in day_rows.iterrows():
-            if idx in processed_indices:
-                continue
-            if fixture_has_unavailability(pre_fixtures_round, idx):
-                req_indices.append(idx)
-            else:
-                no_req_indices.append(idx)
-
-        leftover_sorted = (
-            sort_indices_for_day(req_indices, pre_fixtures_round, day, slots_today) +
-            sort_indices_for_day(no_req_indices, pre_fixtures_round, day, slots_today)
+        all_indices = [
+            idx for idx, _ in day_rows.iterrows()
+            if idx not in processed_indices
+        ]
+        leftover_sorted = sort_indices_for_day(
+            all_indices, pre_fixtures_round, day, slots_today
         )
 
         if not leftover_sorted:
@@ -2760,19 +2833,12 @@ def schedule_round(pre_fixtures_round: pd.DataFrame, round_label) -> tuple[pd.Da
         day_mask = pre_fixtures_round['Day'] == day
         day_rows = pre_fixtures_round[day_mask]
 
-        req_indices = []
-        no_req_indices = []
-        for idx, _ in day_rows.iterrows():
-            if idx in processed_indices:
-                continue
-            if fixture_has_unavailability(pre_fixtures_round, idx):
-                req_indices.append(idx)
-            else:
-                no_req_indices.append(idx)
-
-        leftover_sorted = (
-            sort_indices_for_day(req_indices, pre_fixtures_round, day, slots_today) +
-            sort_indices_for_day(no_req_indices, pre_fixtures_round, day, slots_today)
+        all_indices = [
+            idx for idx, _ in day_rows.iterrows()
+            if idx not in processed_indices
+        ]
+        leftover_sorted = sort_indices_for_day(
+            all_indices, pre_fixtures_round, day, slots_today
         )
 
         if not leftover_sorted:
@@ -2874,19 +2940,12 @@ def schedule_round(pre_fixtures_round: pd.DataFrame, round_label) -> tuple[pd.Da
         day_mask = pre_fixtures_round['Day'] == day
         day_rows = pre_fixtures_round[day_mask]
 
-        req_indices = []
-        no_req_indices = []
-        for idx, _ in day_rows.iterrows():
-            if idx in processed_indices:
-                continue
-            if fixture_has_unavailability(pre_fixtures_round, idx):
-                req_indices.append(idx)
-            else:
-                no_req_indices.append(idx)
-
-        leftovers_sorted = (
-            sort_indices_for_day(req_indices, pre_fixtures_round, day, slots_today) +
-            sort_indices_for_day(no_req_indices, pre_fixtures_round, day, slots_today)
+        all_indices = [
+            idx for idx, _ in day_rows.iterrows()
+            if idx not in processed_indices
+        ]
+        leftovers_sorted = sort_indices_for_day(
+            all_indices, pre_fixtures_round, day, slots_today
         )
 
         if not leftovers_sorted:
@@ -3309,6 +3368,116 @@ else:
     # Legacy output format (unchanged).
     scheduled_df.to_csv(scheduled_path, index=False)
     unscheduled_df.to_csv(unscheduled_path, index=False)
+
+# =========================================================
+# ADVANCED FIXTURE REPORT OUTPUT
+# ---------------------------------------------------------
+# Produces a clean, human-readable report matching the
+# Advanced Fixture Report layout exactly:
+#
+#   Game Date, Grade, Round, Venue, Playing Surface, Time,
+#   Home Team, Away Team, Competition
+#
+# Conventions copied from the reference report:
+#   - Time uses the non-zero-padded 12-hour format (e.g. 9:00AM, 1:30PM).
+#   - BYE rows leave Venue / Playing Surface / Time blank.
+#   - Competition and Game Date are carried through per fixture from the
+#     upload template (falls back to the round date when game date is blank).
+#   - Rows are sorted by Game Date (chronological), then Home Team
+#     (case-insensitive), exactly like the reference.
+#   - One file per round (Advanced_Fixture_Report_Round_{N}.csv) plus a
+#     combined Advanced_Fixture_Report.csv across all rounds.
+# =========================================================
+
+ADVANCED_REPORT_COLUMNS = [
+    'Game Date', 'Grade', 'Round', 'Venue', 'Playing Surface', 'Time',
+    'Home Team', 'Away Team', 'Competition',
+]
+
+
+def _parse_ddmmyyyy(s: str):
+    """Parse a 'd/m/yyyy' date into a sortable tuple; unknown dates sort last."""
+    s = str(s).strip()
+    m = re.match(r'(\d{1,2})/(\d{1,2})/(\d{2,4})', s)
+    if not m:
+        return (9999, 12, 31)
+    d, mo, y = int(m.group(1)), int(m.group(2)), int(m.group(3))
+    if y < 100:
+        y += 2000
+    return (y, mo, d)
+
+
+def _build_advanced_report(sched: pd.DataFrame) -> pd.DataFrame:
+    """
+    Build the Advanced Fixture Report DataFrame from the internal scheduled_df,
+    pulling Game Date / Competition from the upload-template passthrough.
+    """
+    rows = []
+    for _, r in sched.iterrows():
+        key = (
+            str(r.get('Round', '')).strip(),
+            str(r.get('Team 1', '')).strip(),
+            str(r.get('Team 2', '')).strip(),
+            str(r.get('Grade', '')).strip(),
+        )
+        meta = PREFIX_TEMPLATE_PASSTHROUGH.get(key, {})
+
+        game_date = str(meta.get('game date', '') or '').strip()
+        if not game_date:
+            game_date = str(meta.get('round date', '') or '').strip()
+
+        is_bye = str(r.get('Team 2', '')).strip().upper() == 'BYE'
+
+        rows.append({
+            'Game Date': game_date,
+            'Grade': r.get('Grade', ''),
+            'Round': r.get('Round', ''),
+            'Venue': '' if is_bye else r.get('Venue', ''),
+            'Playing Surface': '' if is_bye else r.get('Playing Surface', ''),
+            'Time': '' if is_bye else format_game_time(r.get('Time', '')),
+            'Home Team': r.get('Team 1', ''),
+            'Away Team': r.get('Team 2', ''),
+            'Competition': meta.get('competition', ''),
+        })
+
+    df = pd.DataFrame(rows, columns=ADVANCED_REPORT_COLUMNS)
+    if df.empty:
+        return df
+
+    # Sort by Game Date (chronological) then Home Team (case-insensitive),
+    # matching the reference report's ordering.
+    df['_date_sort'] = df['Game Date'].apply(_parse_ddmmyyyy)
+    df['_home_sort'] = df['Home Team'].astype(str).str.casefold()
+    df = (
+        df.sort_values(['_date_sort', '_home_sort'], kind='stable')
+          .drop(columns=['_date_sort', '_home_sort'])
+          .reset_index(drop=True)
+    )
+    return df
+
+
+if not scheduled_df.empty:
+    advanced_report_df = _build_advanced_report(scheduled_df)
+
+    # Combined report across all rounds.
+    combined_report_path = os.path.join(BASE, 'Advanced_Fixture_Report.csv')
+    advanced_report_df.to_csv(combined_report_path, index=False, lineterminator='\r\n')
+
+    # One file per round, matching the reference naming (..._Round_6.csv).
+    for rnd in sorted(
+        advanced_report_df['Round'].astype(str).unique(),
+        key=lambda x: (len(x), x),
+    ):
+        per_round = advanced_report_df[
+            advanced_report_df['Round'].astype(str) == rnd
+        ]
+        per_round_path = os.path.join(
+            BASE, f'Advanced_Fixture_Report_Round_{rnd}.csv'
+        )
+        per_round.to_csv(per_round_path, index=False, lineterminator='\r\n')
+
+    print(f"Advanced Fixture Report written to {combined_report_path} "
+          f"(plus one file per round).")
 
 print(f"\nDone. Scheduled {len(scheduled_df)} fixtures in total across {len(round_values)} round(s).")
 if len(unscheduled_df):
