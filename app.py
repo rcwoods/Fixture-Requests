@@ -135,6 +135,40 @@ def _norm_round(x):
     return s
 
 
+# ----- division helpers -----------------------------------------------
+# The division token is everything in a grade after day/age/gender, e.g.
+# "Saturday U10 Boys Div  2" -> "Div 2", "Saturday U8 Mixed BLUE" -> "BLUE".
+
+_COLOURS = ['BLUE', 'RED', 'YELLOW', 'GREEN', 'PINK', 'PURPLE']
+
+
+def _div_of(grade):
+    return ' '.join(str(grade).split()[3:])
+
+
+def _canon_div(s):
+    import re
+    return re.sub(r'\s+', ' ', str(s)).strip()
+
+
+def _div_sort_key(d):
+    import re
+    u = d.upper()
+    if u in _COLOURS:
+        return (0, _COLOURS.index(u), '')
+    m = re.search(r'(\d+)', d)
+    num = int(m.group(1)) if m else 999
+    return (1, num, d)
+
+
+def divisions_from_pre_fixtures():
+    pf = load_csv(FILES['pre_fixtures'])
+    if pf is None or 'grade' not in pf.columns:
+        return []
+    divs = {_canon_div(_div_of(g)) for g in pf['grade'] if _div_of(g)}
+    return sorted({d for d in divs if d}, key=_div_sort_key)
+
+
 # ----------------------------------------------------------------------
 # sidebar — status + run
 # ----------------------------------------------------------------------
@@ -167,15 +201,12 @@ with tab_inputs:
     st.write("Edit the stable config below and save. Load the round's matchups "
              "at the bottom.")
 
-    # --- Teams and Division Venues: simple editable tables ---
+    # --- Teams: simple editable table ---
     for key, label, help_text in [
         ('teams', 'Teams',
          "One row per team. Set Linked_Team1..8 for siblings that should be "
          "spaced/clustered, and Unavailable_Times like '<11 am' (no games "
          "before 11am) or '>9:45 am' (no games after 9:45am), separated by ';'."),
-        ('division_venues', 'Division Venues',
-         "Which divisions each court prefers. Used to steer grades to the right "
-         "venues."),
     ]:
         with st.expander(label, expanded=(key == 'teams')):
             st.caption(help_text)
@@ -193,6 +224,109 @@ with tab_inputs:
                 if st.button(f"Save {label}", key=f"save_{key}"):
                     save_csv(edited, FILES[key])
                     st.success(f"Saved {os.path.basename(FILES[key])}")
+
+    # --- Division Venues: pick preferred divisions per court ---
+    with st.expander("Division Venues", expanded=False):
+        dv = load_csv(FILES['division_venues'])
+        if dv is None:
+            up = st.file_uploader("Upload division_venues CSV", type="csv",
+                                  key="up_dv")
+            if up is not None:
+                save_csv(pd.read_csv(up, dtype=str), FILES['division_venues'])
+                st.rerun()
+        else:
+            dv = dv.copy()
+            dv['_label'] = (dv['Venue'].str.strip() + "  ·  "
+                            + dv['Playing Surface'].str.strip())
+            all_divs = divisions_from_pre_fixtures()
+            if not all_divs:
+                st.caption("Tip: load pre_fixtures.csv first and the division list "
+                           "will be drawn from the round's actual grades.")
+            st.caption("Pick the divisions each court should be preferred for. "
+                       "Options come from the divisions in pre_fixtures.csv.")
+            dchoice = st.selectbox("Court", list(dv['_label']), key="dv_court")
+            d_idx = dv.index[dv['_label'] == dchoice][0]
+
+            current_prefs = [_canon_div(p) for p in
+                             str(dv.loc[d_idx, 'Preferred_Divisions']).split(',')
+                             if p.strip()]
+            # Keep any current pref even if it isn't in this round's grades.
+            d_options = sorted(set(all_divs) | set(current_prefs), key=_div_sort_key)
+
+            dv_key = f"divs_{d_idx}"
+            if dv_key not in st.session_state:
+                st.session_state[dv_key] = [p for p in current_prefs if p in d_options]
+
+            qa1, qa2, qa3 = st.columns(3)
+            if qa1.button("Select all", key=f"dall_{d_idx}"):
+                st.session_state[dv_key] = list(d_options)
+                st.rerun()
+            if qa2.button("Clear", key=f"dclr_{d_idx}"):
+                st.session_state[dv_key] = []
+                st.rerun()
+            if qa3.button("Reset", key=f"drst_{d_idx}"):
+                st.session_state[dv_key] = [p for p in current_prefs if p in d_options]
+                st.rerun()
+
+            selected_divs = st.multiselect(
+                "Preferred divisions  (open the dropdown to add; click × to remove)",
+                d_options, key=dv_key)
+
+            nd = len(selected_divs)
+            st.caption(f"{nd} division{'s' if nd != 1 else ''} preferred at this court."
+                       + ("" if nd else " No division will be steered here."))
+
+            if st.button("Save court", key=f"savedv_{d_idx}", type="primary"):
+                ordered = sorted(selected_divs, key=_div_sort_key)
+                dv_disk = load_csv(FILES['division_venues'])
+                dv_disk.loc[d_idx, 'Preferred_Divisions'] = ", ".join(ordered)
+                save_csv(dv_disk, FILES['division_venues'])
+                st.success(f"Saved {dchoice.replace('  ·  ', ' · ')} "
+                           f"({len(ordered)} divisions).")
+
+            # Copy this court's selected divisions to other courts at once.
+            other_courts = [lab for lab in dv['_label'] if lab != dchoice]
+            if other_courts:
+                st.markdown("###### Copy these divisions to other courts")
+                targets = st.multiselect("Apply the selection above to:",
+                                         other_courts, key=f"dvcopy_{d_idx}")
+                if st.button("Copy to selected courts", key=f"dvcopybtn_{d_idx}",
+                             disabled=not targets):
+                    ordered = sorted(selected_divs, key=_div_sort_key)
+                    dv_disk = load_csv(FILES['division_venues'])
+                    dv_disk['_label'] = (dv_disk['Venue'].str.strip() + "  ·  "
+                                         + dv_disk['Playing Surface'].str.strip())
+                    for lab in targets:
+                        ix = dv_disk.index[dv_disk['_label'] == lab]
+                        if len(ix):
+                            dv_disk.loc[ix[0], 'Preferred_Divisions'] = ", ".join(ordered)
+                    save_csv(dv_disk.drop(columns=['_label']), FILES['division_venues'])
+                    st.success(f"Copied {len(ordered)} divisions to "
+                               f"{len(targets)} court(s).")
+
+            # Add a brand-new court to division_venues.
+            st.markdown("###### Add a new court")
+            ac1, ac2 = st.columns(2)
+            new_v = ac1.text_input("Venue", key=f"dvnewv_{d_idx}",
+                                   placeholder="e.g. New Sports Centre")
+            new_s = ac2.text_input("Playing surface", key=f"dvnews_{d_idx}",
+                                   placeholder="e.g. Court 1")
+            if st.button("Add court", key=f"dvadd_{d_idx}",
+                         disabled=not (new_v.strip() and new_s.strip())):
+                dv_disk = load_csv(FILES['division_venues'])
+                dup = ((dv_disk['Venue'].astype(str).str.strip() == new_v.strip())
+                       & (dv_disk['Playing Surface'].astype(str).str.strip() == new_s.strip())).any()
+                if dup:
+                    st.warning("That court already exists.")
+                else:
+                    row = {c: '' for c in dv_disk.columns}
+                    row.update({'Venue': new_v.strip(), 'Playing Surface': new_s.strip(),
+                                'Preferred_Divisions': ''})
+                    dv_disk = pd.concat([dv_disk, pd.DataFrame([row])], ignore_index=True)
+                    save_csv(dv_disk, FILES['division_venues'])
+                    st.success(f"Added {new_v.strip()} · {new_s.strip()}. "
+                               "Add its timeslots below, then set its divisions here.")
+                    st.rerun()
 
     # --- Timeslots: dedicated picker (per court, per round) ---
     with st.expander("Timeslots", expanded=True):
@@ -343,6 +477,74 @@ with tab_inputs:
                 st.session_state.pop(ms_key, None)
                 st.success(f"Removed the Round {rnd_val} override for this court.")
                 st.rerun()
+
+            # Copy the current slots to other courts at once.
+            other_ts = [lab for lab in courts['_label'] if lab != choice]
+            if other_ts:
+                where_txt = "default" if editing_default else f"Round {rnd_val}"
+                st.markdown("###### Copy these slots to other courts")
+                ts_targets = st.multiselect(
+                    f"Apply the slots above ({where_txt}) to:", other_ts,
+                    key=f"tscopy_{ctx}")
+                if st.button("Copy to selected courts", key=f"tscopybtn_{ctx}",
+                             disabled=not ts_targets):
+                    ordered = sorted(selected, key=lambda d: _disp_to_min(d))
+                    file_str = ", ".join(_min_to_file(_disp_to_min(d)) for d in ordered)
+                    disk = load_csv(FILES['timeslots'])
+                    if 'Round' not in disk.columns:
+                        disk['Round'] = ''
+                    disk['Round'] = disk['Round'].fillna('').astype(str)
+                    label_map = {r['_label']: (r['Venue'], r['Playing Surface'], r['Day'])
+                                 for _, r in courts.iterrows()}
+                    for lab in ts_targets:
+                        tv, tsurf, tday = label_map[lab]
+                        m = ((disk['Venue'].astype(str).str.strip() == str(tv).strip())
+                             & (disk['Playing Surface'].astype(str).str.strip() == str(tsurf).strip())
+                             & (disk['Day'].astype(str).str.strip() == str(tday).strip())
+                             & (disk['Round'].map(_norm_round) == _norm_round(rnd_val)))
+                        ix = disk.index[m]
+                        if len(ix):
+                            disk.loc[ix[0], 'Time_Slots'] = file_str
+                        else:
+                            row = {c: '' for c in disk.columns}
+                            row.update({'Venue': tv, 'Playing Surface': tsurf,
+                                        'Day': tday, 'Time_Slots': file_str,
+                                        'Round': _norm_round(rnd_val)})
+                            disk = pd.concat([disk, pd.DataFrame([row])], ignore_index=True)
+                    save_csv(disk, FILES['timeslots'])
+                    st.success(f"Copied {len(ordered)} slots ({where_txt}) to "
+                               f"{len(ts_targets)} court(s).")
+
+            # Add a brand-new court (Venue + Surface + Day) to timeslots.
+            st.markdown("###### Add a new court")
+            nc1, nc2, nc3 = st.columns([2, 1.4, 1])
+            tnew_v = nc1.text_input("Venue", key="tsnewv",
+                                    placeholder="e.g. New Sports Centre")
+            tnew_s = nc2.text_input("Playing surface", key="tsnews",
+                                    placeholder="e.g. Court 1")
+            tnew_d = nc3.selectbox("Day", ["Saturday", "Sunday"], key="tsnewd")
+            if st.button("Add court", key="tsadd",
+                         disabled=not (tnew_v.strip() and tnew_s.strip())):
+                disk = load_csv(FILES['timeslots'])
+                if 'Round' in disk.columns:
+                    disk['Round'] = disk['Round'].fillna('').astype(str)
+                dup = ((disk['Venue'].astype(str).str.strip() == tnew_v.strip())
+                       & (disk['Playing Surface'].astype(str).str.strip() == tnew_s.strip())
+                       & (disk['Day'].astype(str).str.strip() == tnew_d)
+                       & (disk.get('Round', pd.Series([''] * len(disk))).map(_norm_round) == '')).any()
+                if dup:
+                    st.warning("That court and day already exists.")
+                else:
+                    row = {c: '' for c in disk.columns}
+                    row.update({'Venue': tnew_v.strip(), 'Playing Surface': tnew_s.strip(),
+                                'Day': tnew_d, 'Time_Slots': ''})
+                    if 'Round' in disk.columns:
+                        row['Round'] = ''
+                    disk = pd.concat([disk, pd.DataFrame([row])], ignore_index=True)
+                    save_csv(disk, FILES['timeslots'])
+                    st.success(f"Added {tnew_v.strip()} · {tnew_s.strip()} · {tnew_d}. "
+                               "Select it above to set its slots.")
+                    st.rerun()
 
     st.divider()
     st.subheader("Round matchups — pre_fixtures.csv")
