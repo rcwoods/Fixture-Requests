@@ -66,6 +66,25 @@ Because it's a normal Streamlit app you can host it instead of running locally:
 
 Hosting only changes *where* it runs; the workflow above is the same.
 
+## Locking pre-assigned fixtures
+
+If a row in `pre_fixtures.csv` already has a **venue, playing surface, and game
+time**, the scheduler now leaves it exactly as is. It places that game where you
+specified, marks the court and time as taken so nothing else lands on it, and
+the later balancing passes never move it. Every other row is scheduled around
+the locked ones as normal.
+
+A few details worth knowing:
+
+- A row counts as locked only when both venue and game time are filled in. A
+  blank venue or blank time means "you schedule it", as before.
+- If you list the same two teams twice on the same day with different
+  courts/times (e.g. an U8 session), both games are kept and both are locked.
+- If the locked time is not on the venue's normal grid (e.g. a 10-minute U8
+  session), it is still honoured exactly.
+- A run where nothing is pre-filled behaves identically to before, byte for
+  byte, so turning the feature on costs you nothing on a normal week.
+
 ## Testing / safe edits
 
 `test_scheduler.py` is a safety net for when you tune the engine.
