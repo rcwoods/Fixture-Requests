@@ -83,8 +83,8 @@ def save_csv(df, path):
 def file_status_line(label, path):
     if os.path.exists(path):
         n = len(pd.read_csv(path, dtype=str))
-        return f"✓ {label} ({n} rows)"
-    return f"✗ {label} - missing"
+        return f"✓ {label} · {n} rows"
+    return f"◦ {label} · not loaded"
 
 
 # ----- timeslot helpers -----------------------------------------------
@@ -223,31 +223,29 @@ TEMPLATES = {
 
 
 def _section_downloads(skey, filename):
+    """One quiet control for all file in/out: template, current, replace."""
     stem = filename.rsplit('.', 1)[0]
-    st.divider()
-    st.caption("Template · import · export")
-    c1, c2 = st.columns(2)
-    c1.download_button("⬇ Template", TEMPLATES[skey],
-                       file_name=f"{stem}_template.csv", mime="text/csv",
-                       key=f"tmpl_{skey}", use_container_width=True)
     path = FILES[skey]
-    if os.path.exists(path):
-        with open(path, 'r') as f:
-            data = f.read()
-        c2.download_button("⬇ Current CSV", data, file_name=filename,
-                           mime="text/csv", key=f"cur_{skey}",
-                           use_container_width=True)
-    else:
-        c2.caption("No current file yet")
-    up = st.file_uploader(f"⬆ Upload a CSV to replace {filename}",
-                          type="csv", key=f"upio_{skey}")
-    if up is not None:
-        sig = f"{up.name}:{getattr(up, 'size', '')}"
-        if st.session_state.get(f"upsig_{skey}") != sig:
-            st.session_state[f"upsig_{skey}"] = sig
-            save_csv(pd.read_csv(up, dtype=str), path)
-            st.success(f"Loaded {filename}.")
-            st.rerun()
+    with st.popover("Import / export CSV"):
+        c1, c2 = st.columns(2)
+        c1.download_button("Template", TEMPLATES[skey],
+                           file_name=f"{stem}_template.csv", mime="text/csv",
+                           key=f"tmpl_{skey}", use_container_width=True)
+        if os.path.exists(path):
+            with open(path, 'r') as f:
+                data = f.read()
+            c2.download_button("Current CSV", data, file_name=filename,
+                               mime="text/csv", key=f"cur_{skey}",
+                               use_container_width=True)
+        up = st.file_uploader(f"Replace {filename}", type="csv",
+                              key=f"upio_{skey}")
+        if up is not None:
+            sig = f"{up.name}:{getattr(up, 'size', '')}"
+            if st.session_state.get(f"upsig_{skey}") != sig:
+                st.session_state[f"upsig_{skey}"] = sig
+                save_csv(pd.read_csv(up, dtype=str), path)
+                st.success(f"Loaded {filename}.")
+                st.rerun()
 
 
 # ----------------------------------------------------------------------
@@ -255,12 +253,13 @@ def _section_downloads(skey, filename):
 # ----------------------------------------------------------------------
 
 st.sidebar.title("Fixture Scheduler")
-st.sidebar.caption("Everything reads/writes the CSV files next to this app.")
 
-st.sidebar.subheader("Input files")
-for key, label in [('teams', 'teams.csv'), ('timeslots', 'timeslots.csv'),
-                   ('division_venues', 'division_venues.csv'),
-                   ('pre_fixtures', 'pre_fixtures.csv')]:
+_files = [('teams', 'teams.csv'), ('timeslots', 'timeslots.csv'),
+          ('division_venues', 'division_venues.csv'),
+          ('pre_fixtures', 'pre_fixtures.csv')]
+_loaded = sum(os.path.exists(FILES[k]) for k, _ in _files)
+st.sidebar.caption(f"Input files · {_loaded} of {len(_files)} loaded")
+for key, label in _files:
     st.sidebar.write(file_status_line(label, FILES[key]))
 
 st.sidebar.divider()
@@ -294,23 +293,22 @@ tab_inputs, tab_run, tab_results = st.tabs(
 # ---- TAB 1: INPUTS ---------------------------------------------------
 with tab_inputs:
     st.header("Inputs")
-    st.write("Edit the stable config below and save. Load the round's matchups "
-             "at the bottom.")
+    st.caption("Set up teams, venues and timeslots once. Add each round's "
+               "matchups at the bottom.")
 
     # --- Teams: simple editable table ---
     for key, label, help_text in [
         ('teams', 'Teams',
-         "One row per team. Set Linked_Team1..8 for siblings that should be "
-         "spaced/clustered, and Unavailable_Times like '<11 am' (no games "
-         "before 11am) or '>9:45 am' (no games after 9:45am), separated by ';'."),
+         "One row per team. Linked_Team1..8 keeps siblings spaced or together; "
+         "Unavailable_Times blocks early/late games, e.g. '<11 am' or '>9:45 am'."),
     ]:
         with st.expander(label, expanded=(key == 'teams')):
             st.caption(help_text)
             _section_downloads(key, os.path.basename(FILES[key]))
             df = load_csv(FILES[key])
             if df is None:
-                st.info("No teams.csv loaded yet - upload one or download the "
-                        "template above.")
+                st.caption("No teams.csv yet. Use **Import / export CSV** above "
+                           "to upload one or start from the template.")
             else:
                 edited = st.data_editor(df, num_rows="dynamic",
                                         use_container_width=True, key=f"ed_{key}",
@@ -324,8 +322,8 @@ with tab_inputs:
         _section_downloads('division_venues', 'division_venues.csv')
         dv = load_csv(FILES['division_venues'])
         if dv is None:
-            st.info("No division_venues.csv loaded yet - upload one or download "
-                    "the template above.")
+            st.caption("No division_venues.csv yet. Use **Import / export CSV** "
+                       "above to upload one or start from the template.")
         else:
             dv = dv.copy()
             dv['_label'] = (dv['Venue'].str.strip() + "  ·  "
@@ -425,8 +423,8 @@ with tab_inputs:
         _section_downloads('timeslots', 'timeslots.csv')
         ts = load_csv(FILES['timeslots'])
         if ts is None:
-            st.info("No timeslots.csv loaded yet - upload one or download the "
-                    "template above.")
+            st.caption("No timeslots.csv yet. Use **Import / export CSV** above "
+                       "to upload one or start from the template.")
         else:
             ts = ts.copy()
             ts['_rnd'] = ts['Round'].map(_norm_round) if 'Round' in ts.columns else ''
@@ -638,12 +636,15 @@ with tab_inputs:
                     st.rerun()
 
     st.divider()
-    st.subheader("Round matchups - pre_fixtures.csv")
-    st.caption("This is the per-round file from your matchup generator / PlayHQ "
-               "(home vs away per grade, no venue or time yet).")
+    st.subheader("Round matchups")
+    st.caption("The per-round file from PlayHQ or your matchup generator: "
+               "home vs away per grade, no venue or time yet.")
     _section_downloads('pre_fixtures', 'pre_fixtures.csv')
     pf = load_csv(FILES['pre_fixtures'])
-    if pf is not None:
+    if pf is None:
+        st.caption("No pre_fixtures.csv yet. Use **Import / export CSV** above "
+                   "to upload this round's matchups.")
+    else:
         rounds = sorted(pf['round'].unique(), key=lambda x: (len(str(x)), str(x))) \
             if 'round' in pf.columns else []
         st.write(f"Loaded **{len(pf)}** matchups"
@@ -655,8 +656,8 @@ with tab_inputs:
 # ---- TAB 2: RUN ------------------------------------------------------
 with tab_run:
     st.header("Run")
-    st.write("Press **Generate fixtures** (sidebar) to check the inputs and "
-             "schedule the round. Results appear here and in the Results tab.")
+    st.caption("Press **Generate fixtures** in the sidebar to check the inputs "
+               "and schedule every round.")
 
     if run_clicked:
         # Step 1: preflight (reuses run_fixtures.preflight)
