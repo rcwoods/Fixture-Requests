@@ -384,6 +384,11 @@ PREFIX_TEMPLATE_COLUMNS = [
 PREFIX_TEMPLATE_PASSTHROUGH: dict[tuple, dict] = {}
 INPUT_WAS_TEMPLATE = False
 
+# Set to True by _normalize_pre_fixtures when at least one input row arrives
+# with both a venue and a game time. Used to gate the lock pass so a normal
+# run (nothing pre-filled) skips it entirely and behaves exactly as before.
+HAS_PREFIX_LOCKS = False
+
 def _normalize_pre_fixtures(df: pd.DataFrame) -> pd.DataFrame:
     """
     Detect the upload-template layout (lowercase headers with 'home team' /
@@ -413,6 +418,7 @@ def _normalize_pre_fixtures(df: pd.DataFrame) -> pd.DataFrame:
             'organisation', 'competition', 'season', 'round date',
             'game date', 'game alias',
         ]
+        lock_v, lock_s, lock_t = [], [], []
         for _, row in df.iterrows():
             key = (
                 str(row.get('Round', '')).strip(),
@@ -426,6 +432,28 @@ def _normalize_pre_fixtures(df: pd.DataFrame) -> pd.DataFrame:
                     val = row.get(cols_lower[f], '')
                     meta[f] = '' if pd.isna(val) else val
             PREFIX_TEMPLATE_PASSTHROUGH[key] = meta
+
+            # Per-row lock fields: a row is locked only if it has both a venue
+            # and a game time.
+            def _clean(name):
+                if name not in cols_lower:
+                    return ''
+                val = row.get(cols_lower[name], '')
+                return '' if pd.isna(val) else str(val).strip()
+            v, s, tm = _clean('venue'), _clean('playing surface'), _clean('game time')
+            if v and tm:
+                lock_v.append(v); lock_s.append(s); lock_t.append(tm)
+            else:
+                lock_v.append(''); lock_s.append(''); lock_t.append('')
+
+        # Only attach lock columns (and switch the feature on) when something is
+        # actually pre-filled, so a normal run's dataframe is untouched.
+        if any(lock_v):
+            global HAS_PREFIX_LOCKS
+            HAS_PREFIX_LOCKS = True
+            df['Lock_Venue'] = lock_v
+            df['Lock_Surface'] = lock_s
+            df['Lock_Time'] = lock_t
         return df
 
     # Legacy layout: ensure the expected columns exist as-is.
@@ -540,9 +568,15 @@ def effective_timeslots_for_round(round_label):
 if 'Round' not in pre_fixtures_df.columns:
     pre_fixtures_df['Round'] = 1
 
-# Remove duplicate fixtures, now including Round so different rounds stay separate
+# Remove duplicate fixtures, now including Round so different rounds stay separate.
+# When some fixtures are pre-locked, the lock fields join the key so the same
+# pairing deliberately listed at two courts/times is not collapsed. With nothing
+# pre-filled the lock columns are absent and this is the original behaviour.
+_dedup_subset = ['Round', 'Team 1', 'Team 2', 'Grade']
+if 'Lock_Time' in pre_fixtures_df.columns:
+    _dedup_subset = _dedup_subset + ['Lock_Venue', 'Lock_Surface', 'Lock_Time']
 pre_fixtures_df = pre_fixtures_df.drop_duplicates(
-    subset=['Round', 'Team 1', 'Team 2', 'Grade']
+    subset=_dedup_subset
 ).reset_index(drop=True)
 
 # ---------------------------
@@ -2363,6 +2397,10 @@ def repack_unscheduled(
             if occupant_fix is None:
                 continue
 
+            # Never displace a locked (pre-assigned) fixture.
+            if occupant_fix.get('_locked'):
+                continue
+
             # Don't try to swap if occupant shares a team with us
             if occupant_fix['Team 1'] in (team1, team2) or occupant_fix['Team 2'] in (team1, team2):
                 continue
@@ -2476,6 +2514,8 @@ def rebalance_junior_lates(final_fixtures):
     # Build mapping from day -> indices in final_fixtures
     day_to_indices = defaultdict(list)
     for idx, fx in enumerate(final_fixtures):
+        if fx.get('_locked'):
+            continue
         day = fx.get('Day', None)
         t = fx.get('Time', '')
         if day is None or not t:
@@ -2590,6 +2630,62 @@ def schedule_round(pre_fixtures_round: pd.DataFrame, round_label) -> tuple[pd.Da
     final_fixtures: list[dict] = []
     unscheduled: list[dict] = []
     processed_indices: set[int] = set()
+
+    # Stage 0: lock pre-assigned fixtures. Any input row that already has both a
+    # venue and a game time is placed exactly there and marked so later passes
+    # (rebalance / repack) never move it. Entirely skipped when nothing is
+    # pre-filled, so it cannot affect a normal run.
+    if HAS_PREFIX_LOCKS and 'Lock_Time' in pre_fixtures_round.columns:
+        for idx, fixture in pre_fixtures_round.iterrows():
+            team2_raw = fixture['Team 2']
+            if pd.isna(team2_raw):
+                team2_raw = ''
+            if str(team2_raw).strip().upper() in ('', '-', 'BYE'):
+                continue
+
+            v = str(fixture.get('Lock_Venue', '') or '').strip()
+            s = str(fixture.get('Lock_Surface', '') or '').strip()
+            tm = str(fixture.get('Lock_Time', '') or '').strip()
+            if not (v and tm):
+                continue
+
+            day = fixture['Day']
+            composite = f"{v} - {s}" if s else v
+            VENUE_SURFACE_LOOKUP.setdefault(composite, (v, s))
+            lock_min = time_to_minutes(tm)
+
+            chosen = None
+            for sl in master_slots.get(day, []):
+                if (sl['venue'] == composite
+                        and not sl['occupied']
+                        and time_to_minutes(sl['time']) == lock_min):
+                    chosen = sl
+                    break
+            if chosen is not None:
+                time_str = chosen['time']
+                chosen['occupied'] = True
+            else:
+                # Locked time/venue is not on the standard grid (e.g. a 10-min
+                # U8 session): reserve it as a synthetic occupied slot.
+                time_str = tm
+                master_slots.setdefault(day, []).append(
+                    {'time': time_str, 'venue': composite, 'occupied': True}
+                )
+
+            t1, t2 = fixture['Team 1'], fixture['Team 2']
+            final_fixtures.append({
+                'Team 1': t1,
+                'Team 2': t2,
+                'Grade': fixture['Grade'],
+                'Venue': composite,
+                'Day': day,
+                'Time': time_str,
+                '_locked': True,
+            })
+            assigned_times.setdefault(t1, []).append((day, time_str, composite))
+            assigned_times.setdefault(t2, []).append((day, time_str, composite))
+            _record_cluster_home_court(t1, t2, day, composite)
+            processed_indices.add(idx)
 
     # Stage A: collect BYE rows
     bye_rows = []
@@ -3176,9 +3272,24 @@ def schedule_round(pre_fixtures_round: pd.DataFrame, round_label) -> tuple[pd.Da
     # Build DataFrames for this round
     scheduled_df_round = pd.DataFrame(final_fixtures)
     if not scheduled_df_round.empty:
-        scheduled_df_round = scheduled_df_round.drop_duplicates(
-            subset=['Team 1', 'Team 2', 'Grade', 'Day']
-        )
+        if '_locked' in scheduled_df_round.columns:
+            # Locked rows are de-duped only on an exact match (so the same
+            # pairing deliberately listed at two different courts/times both
+            # survive); everything else keeps the original one-per-day rule.
+            locked_mask = scheduled_df_round['_locked'] == True  # noqa: E712
+            locked_part = scheduled_df_round[locked_mask].drop_duplicates(
+                subset=['Team 1', 'Team 2', 'Grade', 'Day', 'Venue', 'Time']
+            )
+            other_part = scheduled_df_round[~locked_mask].drop_duplicates(
+                subset=['Team 1', 'Team 2', 'Grade', 'Day']
+            )
+            scheduled_df_round = pd.concat(
+                [locked_part, other_part], ignore_index=True
+            ).drop(columns=['_locked'])
+        else:
+            scheduled_df_round = scheduled_df_round.drop_duplicates(
+                subset=['Team 1', 'Team 2', 'Grade', 'Day']
+            )
         scheduled_df_round['Time_Sort'] = scheduled_df_round['Time'].apply(time_to_minutes)
         scheduled_df_round = scheduled_df_round.sort_values(
             ['Day', 'Time_Sort']
