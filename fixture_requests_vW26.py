@@ -46,7 +46,7 @@ Key behaviour:
     - U16  → earliest 11:00am
     - U18  → earliest 1:30pm
     - U20  → earliest 1:30pm
-    - Open/Seniors (contains "SENIOR" or "OPEN"): earliest 1:30pm
+    - Open/Seniors (contains "SENIOR" or "OPEN"): earliest 3:00pm
 
   Maximum start times (normal window):
 
@@ -744,9 +744,18 @@ def min_start_minutes_for_age(grade_text: str, day: str | None = None) -> int:
     age_token = extract_age_token_from_grade(grade_text)
     s = grade_text.upper()
 
-    # Seniors / Opens: fixed 1:30pm
+    # Seniors / Opens: 3:00pm floor.
+    # Open is a Sunday-only competition here (the Wednesday Over-30s/35s comp is
+    # scheduled separately and never matches OPEN/SENIOR, so it is unaffected).
+    # Sunday-only reference (rounds 2-7): median 4:30pm, p5 2:15pm, latest
+    # 7:15pm, with only ~6% of games before 3pm. The previous 1:30pm floor let
+    # the earliest-first fill grab early-afternoon slots, piling Open into the
+    # 1:30-3pm block that reality reserves for U18/U20. With the 3pm floor a
+    # Round 2 re-run reproduced the real Sunday Open median exactly (4:30pm).
+    # Force-pass can still extend Open later (up to its max) when a week is
+    # slot-constrained.
     if 'SENIOR' in s or 'OPEN' in s:
-        return 13 * 60 + 30  # 1:30pm
+        return 15 * 60  # 3:00pm
 
     if age_token == 'U8':
         return 8 * 60   # 8:00am
