@@ -2619,6 +2619,334 @@ def rebalance_junior_lates(final_fixtures):
 # Per-round scheduling
 # ---------------------------
 
+def smooth_court_age_gradient(final_fixtures):
+    """
+    Post-processing per round: reduce abrupt age jumps on a court so each court
+    steps up young -> old in small increments, with an intermediate-age 'filler'
+    between far-apart ages (e.g. a U14 game between a court's U12 and U16)
+    wherever a legal one is available. Where none exists, the jump is left as-is.
+
+    SAME-TIME COURT SWAPS ONLY. We never change any game's start time, only
+    which court two same-time games sit on. Because the time is unchanged, every
+    age-window and Unavailable_Times constraint that already held still holds,
+    and no team can become double-booked (no team's time moves, and the two
+    courts simply exchange occupants). The only extra check is that both swapped
+    games stay legal at their new court under the lower-rings venue rules.
+
+    A swap is committed only if it STRICTLY reduces the day's total abrupt-jump
+    count (a band step >= 2, i.e. skipping an age group) AND does not increase
+    the inversion count (a younger game after an older one). This prevents
+    trading one defect for another.
+    """
+    JUMP = 2.0  # band step that counts as 'skipped an age group'
+
+    by_day = defaultdict(list)
+    for idx, fx in enumerate(final_fixtures):
+        if fx.get('_locked'):
+            continue
+        if not fx.get('Time') or not fx.get('Venue'):
+            continue
+        if str(fx.get('Team 2', '')).strip().upper() in ('', '-', 'BYE'):
+            continue
+        by_day[fx['Day']].append(idx)
+
+    def band(i):
+        return age_sort_key_from_grade(final_fixtures[i]['Grade'])
+
+    def day_defects(indices):
+        """Return (abrupt_jumps, inversions) across all courts for this day."""
+        courts = defaultdict(list)
+        for i in indices:
+            courts[final_fixtures[i]['Venue']].append(i)
+        jumps = inversions = 0
+        for items in courts.values():
+            items.sort(key=lambda i: time_to_minutes(final_fixtures[i]['Time']))
+            for a, b in zip(items, items[1:]):
+                d = band(b) - band(a)
+                if d >= JUMP:
+                    jumps += 1
+                elif d < 0:
+                    inversions += 1
+        return jumps, inversions
+
+    def venue_legal(idx, new_venue):
+        fx = final_fixtures[idx]
+        _, age, gender, div = parse_grade(fx['Grade'])
+        allowed = get_lower_ring_allowed_venues(fx['Day'], age, gender, div, fx['Grade'])
+        return allowed is None or new_venue in allowed
+
+    for day, indices in by_day.items():
+        if len(indices) < 3:
+            continue
+        max_iter = 2000
+        it = 0
+        while it < max_iter:
+            it += 1
+            base_j, base_i = day_defects(indices)
+            if base_j == 0:
+                break
+            # group same-time games so we only consider same-time court swaps
+            by_time = defaultdict(list)
+            for i in indices:
+                by_time[final_fixtures[i]['Time']].append(i)
+            improved = False
+            for group in by_time.values():
+                if len(group) < 2:
+                    continue
+                for a in range(len(group)):
+                    for b in range(a + 1, len(group)):
+                        i, j = group[a], group[b]
+                        vi = final_fixtures[i]['Venue']
+                        vj = final_fixtures[j]['Venue']
+                        if vi == vj:
+                            continue
+                        if not venue_legal(i, vj) or not venue_legal(j, vi):
+                            continue
+                        # try the swap
+                        final_fixtures[i]['Venue'], final_fixtures[j]['Venue'] = vj, vi
+                        new_j, new_i = day_defects(indices)
+                        if new_j < base_j and new_i <= base_i:
+                            improved = True
+                            break
+                        # revert
+                        final_fixtures[i]['Venue'], final_fixtures[j]['Venue'] = vi, vj
+                    if improved:
+                        break
+                if improved:
+                    break
+            if not improved:
+                break
+
+
+def close_court_gaps(final_fixtures):
+    """
+    Per round: remove idle gaps inside a court's day. A gap is an empty slot
+    sitting between two of that court's games (e.g. a court runs 9:00 and 10:30
+    with the 9:45 slot left empty). We compact each court's games onto a
+    contiguous run of its slot grid, pushing any unavoidable empty slots to the
+    START or END of the court's day instead of leaving a hole in the middle.
+
+    Games only ever move within their OWN court, so the venue (and the
+    lower-rings venue rules) never change. A repack is committed only if EVERY
+    moved game stays inside its age window, does not newly violate Team 1's
+    Unavailable_Times, lands on a real slot of that court, and creates no
+    same-time clash for either of its teams (including against a linked sibling).
+    Compaction preserves each court's game ORDER, so the young->old gradient that
+    the smoothing pass produced is left intact. If neither a forward pack
+    (empties pushed to the end) nor a backward pack (empties pushed to the front)
+    is fully legal, the court is left unchanged.
+    """
+    # Court slot grids for the active round (mirror build_master_slots()).
+    court_slots = defaultdict(list)  # (day, venue) -> sorted unique [time_str]
+    for _, row in timeslots_df.iterrows():
+        raw = row.get('Time_Slots', '')
+        if pd.isna(raw) or not str(raw).strip():
+            continue
+        for t in str(raw).split(','):
+            t = t.strip()
+            if t:
+                court_slots[(row['Day'], row['Venue'])].append(t)
+    for k in court_slots:
+        seen, uniq = set(), []
+        for t in sorted(court_slots[k], key=time_to_minutes):
+            if t not in seen:
+                seen.add(t)
+                uniq.append(t)
+        court_slots[k] = uniq
+
+    # Index placed (non-bye) games by court, and record each team's busy times.
+    by_court = defaultdict(list)
+    team_times = defaultdict(set)  # (day, team) -> set of minutes
+    for idx, fx in enumerate(final_fixtures):
+        if fx.get('_locked'):
+            continue
+        t, v, day = fx.get('Time'), fx.get('Venue'), fx.get('Day')
+        if not t or not v or not day:
+            continue
+        if str(fx.get('Team 2', '')).strip().upper() in ('', '-', 'BYE'):
+            continue
+        by_court[(day, v)].append(idx)
+        for col in ('Team 1', 'Team 2'):
+            tm = str(fx.get(col, '')).strip()
+            if tm and tm.upper() != 'BYE':
+                team_times[(day, tm)].add(time_to_minutes(t))
+
+    def legal_at(idx, new_t_str, old_t_min):
+        fx = final_fixtures[idx]
+        g, day = fx['Grade'], fx['Day']
+        nt = time_to_minutes(new_t_str)
+        if nt < min_start_minutes_for_age(g, day) or nt > max_start_minutes_for_age(g):
+            return False
+        # Team 1 unavailability: never newly violate it
+        tm1 = str(fx.get('Team 1', '')).strip()
+        un = get_unavailable(tm1)
+        if un is not None and is_time_blocked(new_t_str, un) and not is_time_blocked(fx['Time'], un):
+            return False
+        # No same-time clash for either team (or a linked sibling)
+        for col in ('Team 1', 'Team 2'):
+            tm = str(fx.get(col, '')).strip()
+            if not tm or tm.upper() == 'BYE':
+                continue
+            if nt in (team_times[(day, tm)] - {old_t_min}):
+                return False
+            for lk in get_linked_teams(tm):
+                if nt in team_times[(day, str(lk).strip())]:
+                    return False
+        return True
+
+    for (day, venue), idxs in by_court.items():
+        grid = court_slots.get((day, venue))
+        if not grid or len(idxs) < 2:
+            continue
+        games = sorted(idxs, key=lambda i: time_to_minutes(final_fixtures[i]['Time']))
+        grid_min = [time_to_minutes(t) for t in grid]
+        try:
+            gidx = [grid_min.index(time_to_minutes(final_fixtures[i]['Time'])) for i in games]
+        except ValueError:
+            continue  # a game isn't on this court's grid; leave it alone
+        n = len(games)
+        if gidx[-1] - gidx[0] == n - 1:
+            continue  # already contiguous: no interior gap
+
+        def try_pack(anchor_start):
+            if anchor_start < 0 or anchor_start + n > len(grid):
+                return None
+            targets = [grid[anchor_start + k] for k in range(n)]
+            for gi, tstr in zip(games, targets):
+                if not legal_at(gi, tstr, time_to_minutes(final_fixtures[gi]['Time'])):
+                    return None
+            return targets
+
+        chosen = try_pack(gidx[0]) or try_pack(gidx[-1] - (n - 1))
+        if not chosen:
+            continue
+        for gi, tstr in zip(games, chosen):
+            old_t = time_to_minutes(final_fixtures[gi]['Time'])
+            new_t = time_to_minutes(tstr)
+            if old_t == new_t:
+                continue
+            for col in ('Team 1', 'Team 2'):
+                tm = str(final_fixtures[gi].get(col, '')).strip()
+                if tm and tm.upper() != 'BYE':
+                    team_times[(day, tm)].discard(old_t)
+                    team_times[(day, tm)].add(new_t)
+            final_fixtures[gi]['Time'] = tstr
+
+
+_GAP_FILL_FLOOR_GIVE_MIN = 45
+# Largest amount (minutes) a game may start BELOW its normal age floor, used
+# ONLY to fill what would otherwise be an empty interior slot on its court. One
+# grid slot is ~45 min. Set to 0 to keep age floors hard (a few gaps then remain
+# where a floored game — e.g. an Open game pinned at its 3pm floor — sits above
+# an empty earlier slot, with nothing else able to drop into it). Reality's
+# Sunday Open has an early tail to ~2:15pm, so a one-slot give to avoid leaving a
+# court idle is consistent with it.
+
+
+def close_court_gaps(final_fixtures, master_slots):
+    """
+    Post-processing per round: pack each court's games into the earliest legal
+    slots, in their existing young->old order, so no empty slot sits between two
+    games on a court. Only a game's START TIME changes; its court is unchanged,
+    so lower-rings venue rules are automatically preserved, and because games
+    keep their order the abrupt-jump / inversion counts are unchanged.
+
+    Safety on every move:
+      - the new slot is within the game's age window (its floor may be eased by
+        at most _GAP_FILL_FLOOR_GIVE_MIN, and only when that fills a gap),
+      - a game is only ever moved EARLIER (never later),
+      - neither team's Unavailable_Times is newly violated,
+      - no team is left playing two games at once (checked against the live,
+        mutating schedule),
+      - two games on a court can never collide (each takes a strictly later slot
+        than the previous game on that court).
+
+    A gap is left only where even an eased floor cannot reach the empty slot.
+    """
+    by_day_courts = defaultdict(lambda: defaultdict(list))  # day -> court -> [idx]
+    for idx, fx in enumerate(final_fixtures):
+        if fx.get('_locked'):
+            continue
+        if not fx.get('Time') or not fx.get('Venue'):
+            continue
+        if str(fx.get('Team 2', '')).strip().upper() in ('', '-', 'BYE'):
+            continue
+        by_day_courts[fx['Day']][fx['Venue']].append(idx)
+
+    def _named(fx):
+        out = []
+        for col in ('Team 1', 'Team 2'):
+            nm = str(fx.get(col, '')).strip()
+            if nm and nm.upper() not in ('-', 'BYE'):
+                out.append(nm)
+        return out
+
+    for day, courts in by_day_courts.items():
+        # available slot times per court on this day
+        court_slots = defaultdict(list)
+        for s in master_slots.get(day, []):
+            court_slots[s['venue']].append(s['time'])
+        for c in list(court_slots):
+            court_slots[c] = sorted(set(court_slots[c]), key=time_to_minutes)
+
+        # live team occupancy for this day: team -> set of minute-times
+        team_busy = defaultdict(set)
+        for idxs in courts.values():
+            for i in idxs:
+                m = time_to_minutes(final_fixtures[i]['Time'])
+                for nm in _named(final_fixtures[i]):
+                    team_busy[nm].add(m)
+
+        for court, idxs in courts.items():
+            slots = court_slots.get(court)
+            if not slots:
+                continue
+            order = sorted(idxs, key=lambda i: time_to_minutes(final_fixtures[i]['Time']))
+            ptr = None  # minute-time of the last slot assigned on this court
+            for i in order:
+                fx = final_fixtures[i]
+                cur_min = time_to_minutes(fx['Time'])
+                g = fx['Grade']
+                floor = min_start_minutes_for_age(g, day)
+                cap = max_start_minutes_for_age(g)
+                names = _named(fx)
+
+                chosen_str = None
+                chosen_min = None
+                for tstr in slots:
+                    tm = time_to_minutes(tstr)
+                    if ptr is not None and tm <= ptr:
+                        continue
+                    if tm > cap or tm > cur_min:
+                        break  # nothing earlier+legal left; keep current slot
+                    if tm < floor - _GAP_FILL_FLOOR_GIVE_MIN:
+                        continue
+                    # Unavailable_Times: don't newly block either team
+                    blocked = False
+                    for nm in names:
+                        win = get_unavailable(nm)
+                        if win and is_time_blocked(tstr, win) and not is_time_blocked(fx['Time'], win):
+                            blocked = True
+                            break
+                    if blocked:
+                        continue
+                    # team clash: neither team already at tm (other than this game)
+                    if any(tm in team_busy.get(nm, ()) and tm != cur_min for nm in names):
+                        continue
+                    chosen_str, chosen_min = tstr, tm
+                    break
+
+                if chosen_str is None:
+                    ptr = cur_min
+                    continue
+                if chosen_min != cur_min:
+                    for nm in names:
+                        team_busy[nm].discard(cur_min)
+                        team_busy[nm].add(chosen_min)
+                    fx['Time'] = chosen_str
+                ptr = chosen_min
+
+
 def schedule_round(pre_fixtures_round: pd.DataFrame, round_label) -> tuple[pd.DataFrame, pd.DataFrame]:
     """
     Schedule all fixtures for a single Round (e.g. Round 1, 2, 3...).
@@ -3240,6 +3568,18 @@ def schedule_round(pre_fixtures_round: pd.DataFrame, round_label) -> tuple[pd.Da
         pre_fixtures_round, processed_indices, final_fixtures, master_slots,
         assigned_times,
     )
+
+    # Smoothing: reduce abrupt age jumps on a court by swapping in an
+    # intermediate-age filler from another court at the same time, wherever a
+    # legal one exists (same-time court swaps only, so no other constraint can
+    # break). Jumps with no available filler are left as-is.
+    smooth_court_age_gradient(final_fixtures)
+
+    # Gap-closing: pull each court's games into the earliest legal slots so no
+    # empty slot sits between two games. Only start times change (court fixed),
+    # order is preserved, and every move re-checks the age window, both teams'
+    # unavailability, and same-time clashes.
+    close_court_gaps(final_fixtures, master_slots)
 
     # Unscheduled for this round
     for idx, fixture in pre_fixtures_round.iterrows():
